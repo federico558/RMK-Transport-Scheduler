@@ -268,65 +268,33 @@ async function generateDocketPDF(load, projectName, projectAddress, siteContact,
 
 // ─── DISPATCH SHEET PDF (A4 landscape) ───────────────────────────────────────
 
-async function generateDispatchPDF(loads, projectName, maxWeight, maxLength, loadTruckLabels, loadOverflow, loadTopLifters, panelSideLifters, panelNotes) {
+async function generateDispatchPDF(loads, projectName, maxWeight, maxLength, loadTruckLabels, loadOverflow, loadTopLifters, panelSideLifters, panelNotes, panelTimeAtYard, panelTimeOnSite, loadDelivDates, loadTrucksMap, defaultTruckTypeId) {
   const PDFLib = await getPdfLib();
   const { PDFDocument, rgb, StandardFonts } = PDFLib;
-  const doc  = await PDFDocument.create();
-  const page = doc.addPage([842, 595]);
-  const { width, height } = page.getSize();
+  const doc     = await PDFDocument.create();
   const regular = await doc.embedFont(StandardFonts.Helvetica);
   const bold    = await doc.embedFont(StandardFonts.HelveticaBold);
+
+  // Embed logo once
+  let logoImg = null;
+  try {
+    const logoBytes = Uint8Array.from(atob(RMK_LOGO_B64), ch => ch.charCodeAt(0));
+    logoImg = await doc.embedJpg(logoBytes);
+  } catch(e) {}
+
   const NAVY   = hexRgb("#17375E", PDFLib);
   const ORANGE = hexRgb("#E8A020", PDFLib);
   const LGRAY  = hexRgb("#F4F6FA", PDFLib);
   const MGRAY  = hexRgb("#D8DCE6", PDFLib);
   const DTEXT  = hexRgb("#1A2A3A", PDFLib);
-  const LBLUE  = hexRgb("#90A8CC", PDFLib);
-  const LLBLUE = hexRgb("#7A9DC0", PDFLib);
   const HBLUE  = hexRgb("#DCE6F1", PDFLib);
-  const M = 20, cw = width - M*2;
 
-  // ── Full-width black header bar ──
-  const HEADER_H = 56;
-  page.drawRectangle({ x:0, y: height - HEADER_H, width, height: HEADER_H, color: rgb(0,0,0) });
+  const PAGE_W = 842, PAGE_H = 595;
+  const M = 20, cw = PAGE_W - M*2;
+  const HEADER_H = 56, FOOTER_H = 26, ROW_H = 15;
+  const COL_ROW_H = 15;
 
-  // ── RMK Logo (JPEG embedded from base64) ──
-  const LOGO_W = 50, LOGO_H = 46;
-  const LOGO_X = M;
-  const LOGO_Y = height - HEADER_H + (HEADER_H - LOGO_H) / 2;
-  try {
-    const logoBytes = Uint8Array.from(atob(RMK_LOGO_B64), ch => ch.charCodeAt(0));
-    const logoImg   = await doc.embedJpg(logoBytes);
-    page.drawImage(logoImg, { x: LOGO_X, y: LOGO_Y, width: LOGO_W, height: LOGO_H });
-  } catch(e) {
-    page.drawText("RMK", { x: LOGO_X+4, y: height-HEADER_H+(HEADER_H/2)+2, size:12, font: bold, color: rgb(1,1,1) });
-  }
-
-  // Thin white vertical divider after logo
-  page.drawLine({
-    start: { x: LOGO_X + LOGO_W + 10, y: height - HEADER_H + 10 },
-    end:   { x: LOGO_X + LOGO_W + 10, y: height - 10 },
-    thickness: 0.5, color: rgb(1,1,1),
-  });
-
-  // ── Project name + title ──
-  const TX = LOGO_X + LOGO_W + 18;
-  page.drawText(projectName, {
-    x: TX, y: height - 20, size: 12, font: bold, color: rgb(1,1,1),
-  });
-  page.drawText("Delivery Dispatch Sheet", {
-    x: TX, y: height - 35, size: 9, font: regular, color: rgb(1,1,1),
-  });
-
-  // totalPanels still needed for footer
-  const totalPanels = loads.reduce((s,l) => s + l.panels.length, 0);
-
-  // ── Table ──
-  let y = height - HEADER_H - 10;
-  const FOOTER_H = 26;
-  const ROW_H    = 15;
-  const BOTTOM_LIMIT = M + FOOTER_H + 4;
-
+  // Column definitions
   const TC = [
     { label:"Product",        w: cw*0.088 },
     { label:"Length (mm)",    w: cw*0.078 },
@@ -344,26 +312,105 @@ async function generateDispatchPDF(loads, projectName, maxWeight, maxLength, loa
   let colX = M;
   TC.forEach(col => { col.x = colX; colX += col.w; });
 
-  // Header row
-  page.drawRectangle({ x: M, y: y - ROW_H, width: cw, height: ROW_H, color: rgb(0,0,0) });
-  TC.forEach(col => {
-    page.drawLine({ start:{x:col.x, y:y}, end:{x:col.x, y:y-ROW_H}, thickness:0.3, color: rgb(0.3,0.3,0.3) });
-    page.drawText(col.label, { x: col.x+3, y: y-ROW_H+4, size: 6.2, font: bold, color: rgb(1,1,1) });
-  });
-  y -= ROW_H;
+  const totalW      = loads.reduce((s,l) => s + l.totalWeight, 0);
+  const summaryItems = [
+    { label:"TOTAL PANELS",  val: String(loads.reduce((s,l)=>s+l.panels.length,0)) },
+    { label:"TOTAL LOADS",   val: String(loads.length) },
+    { label:"TOTAL WEIGHT",  val: totalW.toFixed(1) + " T" },
+  ];
+  const colW3 = cw / summaryItems.length;
 
-  // Data rows
+  // ── Draw the black header bar (logo + project name) onto a page ──
+  const drawPageHeader = (pg) => {
+    const { width, height } = pg.getSize();
+    pg.drawRectangle({ x:0, y: height - HEADER_H, width, height: HEADER_H, color: rgb(0,0,0) });
+    const LOGO_W = 50, LOGO_H = 46;
+    const LOGO_X = M, LOGO_Y = height - HEADER_H + (HEADER_H - LOGO_H) / 2;
+    if (logoImg) {
+      pg.drawImage(logoImg, { x: LOGO_X, y: LOGO_Y, width: LOGO_W, height: LOGO_H });
+    } else {
+      pg.drawText("RMK", { x: LOGO_X+4, y: height-HEADER_H+(HEADER_H/2)+2, size:12, font: bold, color: rgb(1,1,1) });
+    }
+    pg.drawLine({
+      start: { x: LOGO_X + LOGO_W + 10, y: height - HEADER_H + 10 },
+      end:   { x: LOGO_X + LOGO_W + 10, y: height - 10 },
+      thickness: 0.5, color: rgb(1,1,1),
+    });
+    const TX = LOGO_X + LOGO_W + 18;
+    pg.drawText(projectName,           { x: TX, y: height - 20, size: 12, font: bold,    color: rgb(1,1,1) });
+    pg.drawText("Delivery Dispatch Sheet", { x: TX, y: height - 35, size: 9,  font: regular, color: rgb(1,1,1) });
+  };
+
+  // ── Draw the column header row at position y, return new y ──
+  const drawColHeader = (pg, y) => {
+    pg.drawRectangle({ x: M, y: y - COL_ROW_H, width: cw, height: COL_ROW_H, color: rgb(0,0,0) });
+    TC.forEach(col => {
+      pg.drawLine({ start:{x:col.x, y:y}, end:{x:col.x, y:y-COL_ROW_H}, thickness:0.3, color: rgb(0.3,0.3,0.3) });
+      pg.drawText(col.label, { x: col.x+3, y: y-COL_ROW_H+4, size: 6.2, font: bold, color: rgb(1,1,1) });
+    });
+    return y - COL_ROW_H;
+  };
+
+  // ── Draw footer onto a page ──
+  const drawFooter = (pg) => {
+    pg.drawRectangle({ x: M, y: M, width: cw, height: FOOTER_H, color: rgb(0,0,0) });
+    summaryItems.forEach((item, i) => {
+      const cx = M + i * colW3 + colW3 / 2;
+      const lw = regular.widthOfTextAtSize(item.label, 6.5);
+      const vw = bold.widthOfTextAtSize(item.val, 11);
+      pg.drawText(item.label, { x: cx - lw/2, y: M + FOOTER_H - 10, size: 6.5, font: regular, color: rgb(1,1,1) });
+      pg.drawText(item.val,   { x: cx - vw/2, y: M + 4,              size: 11,  font: bold,    color: rgb(1,1,1) });
+      if (i < summaryItems.length - 1) {
+        pg.drawLine({
+          start: { x: M + colW3*(i+1), y: M+3 },
+          end:   { x: M + colW3*(i+1), y: M+FOOTER_H-3 },
+          thickness: 0.5, color: rgb(0.3,0.3,0.3),
+        });
+      }
+    });
+  };
+
+  // ── Start first page ──
+  const newPage = () => {
+    const pg = doc.addPage([PAGE_W, PAGE_H]);
+    drawPageHeader(pg);
+    const startY = PAGE_H - HEADER_H - 10;
+    const y = drawColHeader(pg, startY);
+    return { pg, y };
+  };
+
+  let { pg: page, y } = newPage();
+  const BOTTOM_LIMIT = M + FOOTER_H + 4;
+
+  // ── All panels sorted by delivery sequence ──
   const allPanels = loads
     .flatMap(l => l.lanes.flatMap((lane, li) =>
       lane.map(p => ({ ...p, loadNumber: l.number, lane: li===0?"A":li===1?"B":"C" }))
     ))
     .sort((a,b) => a.deliverySequence - b.deliverySequence);
 
+  const charPx = 7 * 0.58;
+  const commentCol = TC[11];
+  const maxCharsPerLine = Math.floor((commentCol.w - 6) / charPx);
+  const wrapLines = (txt) => {
+    if (!txt) return [];
+    const words = txt.split(" ");
+    const lines = []; let line = "";
+    for (const w of words) {
+      const test = line ? line + " " + w : w;
+      if (test.length > maxCharsPerLine) { if (line) lines.push(line); line = w; }
+      else line = test;
+    }
+    if (line) lines.push(line);
+    return lines;
+  };
+
   let prevLoad = null;
-  allPanels.forEach((p, i) => {
+  let rowIndex = 0;
+
+  for (const p of allPanels) {
     const newLoad = p.loadNumber !== prevLoad;
 
-    // Build comment text first so we can measure it
     const commentTxt = (() => {
       const parts = [];
       if (newLoad && loadOverflow && loadOverflow[p.loadNumber]) parts.push("Review Truck Type!");
@@ -375,65 +422,51 @@ async function generateDispatchPDF(loads, projectName, maxWeight, maxLength, loa
       return parts.join(" | ");
     })();
 
-    // Word-wrap comment into lines that fit the comment column
-    const commentCol = TC[11];
-    const charPx = 7 * 0.58;
-    const maxCharsPerLine = Math.floor((commentCol.w - 6) / charPx);
-    const wrapLines = (txt) => {
-      if (!txt) return [];
-      const words = txt.split(" ");
-      const lines = [];
-      let line = "";
-      for (const w of words) {
-        const test = line ? line + " " + w : w;
-        if (test.length > maxCharsPerLine) { if (line) lines.push(line); line = w; }
-        else line = test;
-      }
-      if (line) lines.push(line);
-      return lines;
-    };
     const commentLines = wrapLines(commentTxt);
     const lineH = 8;
-    const BASE_H = 15;
-    const rowH = Math.max(BASE_H, commentLines.length * lineH + 4);
+    const rowH = Math.max(ROW_H, commentLines.length * lineH + 4);
 
-    if (y - rowH < BOTTOM_LIMIT) return;
+    // ── Paginate: if row won't fit, close current page and start a new one ──
+    if (y - rowH < BOTTOM_LIMIT) {
+      drawFooter(page);
+      ({ pg: page, y } = newPage());
+      prevLoad = null; // force Load No. to reprint on new page
+    }
 
-    // Alternating row background
-    const rowBg = i%2===0 ? LGRAY : rgb(1,1,1);
+    const rowBg = rowIndex % 2 === 0 ? LGRAY : rgb(1,1,1);
     page.drawRectangle({ x: M, y: y-rowH, width: cw, height: rowH, color: rowBg });
 
-    // Load No cell highlight on new load
-    if (newLoad) {
+    const isNewLoadOnPage = p.loadNumber !== prevLoad;
+    if (isNewLoadOnPage) {
       page.drawRectangle({ x: TC[5].x, y: y-rowH, width: TC[5].w, height: rowH, color: HBLUE });
     }
 
-    // Cell borders
     TC.forEach(col => {
       page.drawRectangle({ x: col.x, y: y-rowH, width: col.w, height: rowH,
         borderColor: MGRAY, borderWidth: 0.25 });
     });
 
-    // Load group separator
-    if (newLoad && i > 0) {
+    if (isNewLoadOnPage && rowIndex > 0) {
       page.drawLine({ start:{x:M, y:y}, end:{x:M+cw, y:y}, thickness:1.2, color: rgb(0,0,0) });
     }
 
-    // Cell text (all columns except comment)
     const vals = [
       p.productId, String(p.length), String(p.height), p.mass.toFixed(1),
-      String(p.deliverySequence), newLoad ? String(p.loadNumber) : "", p.lane,
-      "","","",(newLoad&&loadTruckLabels&&loadTruckLabels[p.loadNumber])||"",
+      String(p.deliverySequence), isNewLoadOnPage ? String(p.loadNumber) : "", p.lane,
+      (panelTimeAtYard&&panelTimeAtYard[p.productId])||"",
+      (panelTimeOnSite&&panelTimeOnSite[p.productId])||"",
+      (isNewLoadOnPage&&loadDelivDates&&loadDelivDates[p.loadNumber])||"",
+      (isNewLoadOnPage&&loadTruckLabels&&loadTruckLabels[p.loadNumber])||"",
     ];
-    const textY = y - rowH + (rowH - 7) / 2; // vertically centre single-line cells
+    const textY = y - rowH + (rowH - 7) / 2;
     TC.forEach((col, ci) => {
-      if (ci === 11) return; // comment drawn separately
+      if (ci === 11) return;
       const txt = vals[ci];
       if (!txt) return;
-      const isBoldCell = ci === 0 || (ci === 5 && newLoad);
+      const isBoldCell = ci === 0 || (ci === 5 && isNewLoadOnPage);
       const cellColor  = ci === 0 ? rgb(0,0,0)
                        : ci === 6 ? ORANGE
-                       : (ci === 5 && newLoad) ? rgb(0,0,0)
+                       : (ci === 5 && isNewLoadOnPage) ? rgb(0,0,0)
                        : DTEXT;
       const maxC = Math.floor((col.w - 5) / charPx);
       const disp = txt.length > maxC ? txt.slice(0, maxC-1)+"…" : txt;
@@ -441,7 +474,6 @@ async function generateDispatchPDF(loads, projectName, maxWeight, maxLength, loa
         font: isBoldCell ? bold : regular, color: cellColor });
     });
 
-    // Draw comment lines top-aligned inside the cell
     if (commentLines.length > 0) {
       const commentColor = commentTxt.startsWith("Review Truck")
         ? hexRgb("#C00000", PDFLib) : DTEXT;
@@ -456,33 +488,11 @@ async function generateDispatchPDF(loads, projectName, maxWeight, maxLength, loa
 
     prevLoad = p.loadNumber;
     y -= rowH;
-  });
+    rowIndex++;
+  }
 
-  // ── Footer totals bar ──
-  page.drawRectangle({ x: M, y: M, width: cw, height: FOOTER_H, color: rgb(0,0,0) });
-  const totalW = loads.reduce((s,l) => s + l.totalWeight, 0);
-  const summaryItems = [
-    { label:"TOTAL PANELS",  val: String(allPanels.length) },
-    { label:"TOTAL LOADS",   val: String(loads.length) },
-    { label:"TOTAL WEIGHT",  val: totalW.toFixed(1) + " T" },
-  ];
-  const colW3 = cw / summaryItems.length;
-  summaryItems.forEach((item, i) => {
-    const cx = M + i * colW3 + colW3 / 2;
-    const lw = regular.widthOfTextAtSize(item.label, 6.5);
-    const vw = bold.widthOfTextAtSize(item.val, 11);
-    page.drawText(item.label, { x: cx - lw/2, y: M + FOOTER_H - 10, size: 6.5, font: regular, color: rgb(1,1,1) });
-    page.drawText(item.val,   { x: cx - vw/2, y: M + 4,              size: 11,  font: bold,    color: rgb(1,1,1) });
-    if (i < summaryItems.length - 1) {
-      page.drawLine({
-        start: { x: M + colW3*(i+1), y: M+3 },
-        end:   { x: M + colW3*(i+1), y: M+FOOTER_H-3 },
-        thickness: 0.5, color: rgb(0.3,0.3,0.3),
-      });
-    }
-  });
-
-
+  // Footer on last page
+  drawFooter(page);
 
   return await doc.save();
 }
@@ -619,6 +629,9 @@ function App() {
   const [loadDelivDates,  setLoadDelivDates]  = useState({});  // { loadNumber: "DD/MM/YYYY" }
   const [loadCarriers,    setLoadCarriers]    = useState({});  // { loadNumber: string }
   const [panelNotes,      setPanelNotes]      = useState({});  // { productId: string }
+  const [panelTimeAtYard,  setPanelTimeAtYard]  = useState({});  // { productId: string }
+  const [panelTimeOnSite,  setPanelTimeOnSite]  = useState({});  // { productId: string }
+  const [showDispatchPreview, setShowDispatchPreview] = useState(false);
 
 
   const openPicker = (ref) => { try { ref.current.showPicker(); } catch(e) { ref.current.click(); } };
@@ -751,6 +764,9 @@ function App() {
     if (raw.length > 4) out += "/" + raw.slice(4, 8);
     setter(d => ({ ...d, [key]: out }));
   };
+  const [selectedPanels,   setSelectedPanels]   = useState(new Set()); // for bulk side-lifter toggle
+  const [selectedTLPanels, setSelectedTLPanels] = useState(new Set()); // for bulk top-lifter toggle
+
   const [dragOver,     setDragOver]     = useState(false);
   const [error,        setError]        = useState("");
   const [busy,         setBusy]         = useState("");
@@ -762,6 +778,7 @@ function App() {
       version: 1,
       step, config, data, loads, sideLifters, topLifters,
       loadTrucks, loadDates, loadDelivDates, loadCarriers, panelNotes,
+      panelTimeAtYard, panelTimeOnSite,
     };
     const blob = new Blob([JSON.stringify(session, null, 2)], { type: "application/json" });
     const url  = URL.createObjectURL(blob);
@@ -790,6 +807,8 @@ function App() {
         if (s.loadDelivDates) setLoadDelivDates(s.loadDelivDates);
         if (s.loadCarriers)   setLoadCarriers(s.loadCarriers);
         if (s.panelNotes)     setPanelNotes(s.panelNotes);
+        if (s.panelTimeAtYard)  setPanelTimeAtYard(s.panelTimeAtYard);
+        if (s.panelTimeOnSite)  setPanelTimeOnSite(s.panelTimeOnSite);
         if (s.loads && s.loads.length > 0) setActiveLoad(s.loads[0]);
       } catch(err) { alert("Could not read session file: " + err.message); }
     };
@@ -838,7 +857,7 @@ function App() {
         truckLabels[l.number] = lt.label;
         overflowMap[l.number] = l.laneLength[0] > lt.maxLength || l.laneLength[1] > lt.maxLength || l.laneLength[2] > lt.maxLength;
       });
-      downloadPDF(await generateDispatchPDF(loads, config.projectName, parseFloat(config.maxWeight)||22.5, (TRUCK_TYPES.find(t=>t.id===config.truckTypeId)||TRUCK_TYPES[2]).maxLength, truckLabels, overflowMap, topLifters, sideLifters, panelNotes), `${config.projectName}_Dispatch_Sheet.pdf`);
+      downloadPDF(await generateDispatchPDF(loads, config.projectName, parseFloat(config.maxWeight)||22.5, (TRUCK_TYPES.find(t=>t.id===config.truckTypeId)||TRUCK_TYPES[2]).maxLength, truckLabels, overflowMap, topLifters, sideLifters, panelNotes, panelTimeAtYard, panelTimeOnSite, loadDelivDates, loadTrucks, config.truckTypeId), `${config.projectName}_Dispatch_Sheet.pdf`);
     }
     catch(e) { setError("PDF error: "+e.message); }
     setBusy("");
@@ -972,38 +991,189 @@ function App() {
           )}
 
           {/* ── REVIEW ── */}
-          {step==="review"&&data&&(
+          {step==="review"&&data&&(()=>{
+            const sortedPanels = [...data.panels].sort((a,b)=>a.deliverySequence-b.deliverySequence);
+            const allIds = sortedPanels.map(p=>p.productId);
+            const anyTopLifters = Object.values(sideLifters).some(Boolean);
+            // IDs of panels eligible for top lifters (side lifters on)
+            const tlEligibleIds = sortedPanels.filter(p=>!!sideLifters[p.productId]).map(p=>p.productId);
+
+            // ── Side Lifters selection ──
+            const allSelected  = allIds.length > 0 && allIds.every(id => selectedPanels.has(id));
+            const someSelected = selectedPanels.size > 0;
+            const toggleSelectAll = () => {
+              if (allSelected) setSelectedPanels(new Set());
+              else setSelectedPanels(new Set(allIds));
+            };
+            const toggleSelect = (id) => {
+              setSelectedPanels(prev => { const n=new Set(prev); n.has(id)?n.delete(id):n.add(id); return n; });
+            };
+            const applyBulkSideLifters = (val) => {
+              setSideLifters(sl => { const n={...sl}; selectedPanels.forEach(id=>{n[id]=val;}); return n; });
+              setSelectedPanels(new Set());
+            };
+
+            // ── Top Lifters selection (only among TL-eligible panels) ──
+            const allTLSelected  = tlEligibleIds.length > 0 && tlEligibleIds.every(id => selectedTLPanels.has(id));
+            const someTLSelected = selectedTLPanels.size > 0;
+            const toggleSelectAllTL = () => {
+              if (allTLSelected) setSelectedTLPanels(new Set());
+              else setSelectedTLPanels(new Set(tlEligibleIds));
+            };
+            const toggleSelectTL = (id) => {
+              setSelectedTLPanels(prev => { const n=new Set(prev); n.has(id)?n.delete(id):n.add(id); return n; });
+            };
+            const applyBulkTopLifters = (val) => {
+              setTopLifters(tl => { const n={...tl}; selectedTLPanels.forEach(id=>{n[id]=val;}); return n; });
+              setSelectedTLPanels(new Set());
+            };
+
+            return (
             <div>
               <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:26,fontWeight:700,marginBottom:4,color:P.accentLight}}>Panel Data Preview</div>
-              <p style={{color:P.muted,marginBottom:20,fontSize:13}}>
+              <p style={{color:P.muted,marginBottom:16,fontSize:13}}>
                 Review all panels imported from the spreadsheet. Toggle <b style={{color:P.text}}>Side Lifters</b> per panel — when checked the panel is transported rotated and its <b style={{color:"#5b8dd9"}}>Height</b> is used for lane length; otherwise its <b style={{color:P.accent}}>Length</b> is used.
+                <br/><span style={{color:P.muted}}>Use the checkboxes to select multiple panels and apply bulk actions.</span>
               </p>
+
+              {/* ── Side Lifters bulk toolbar ── */}
+              <div style={{
+                display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",
+                background:someSelected?P.card:P.surface,
+                border:`1px solid ${someSelected?P.accent:P.border}`,
+                borderRadius:8,padding:"10px 14px",marginBottom:8,
+                transition:"all 0.2s",minHeight:46,
+              }}>
+                {someSelected ? (
+                  <>
+                    <span style={{fontSize:11,color:P.muted,textTransform:"uppercase",letterSpacing:0.8}}>Side Lifters</span>
+                    <div style={{width:1,height:20,background:P.border}}/>
+                    <span style={{fontSize:12,fontWeight:700,color:P.accentLight,fontFamily:"'IBM Plex Mono'"}}>
+                      {selectedPanels.size} panel{selectedPanels.size!==1?"s":""} selected
+                    </span>
+                    <div style={{width:1,height:20,background:P.border}}/>
+                    <button onClick={()=>applyBulkSideLifters(true)}
+                      style={{background:"rgba(91,141,217,0.2)",border:"1px solid #5b8dd9",borderRadius:5,padding:"4px 12px",color:"#5b8dd9",fontSize:11,fontWeight:700,cursor:"pointer",letterSpacing:0.5}}>
+                      ✓ Enable All
+                    </button>
+                    <button onClick={()=>applyBulkSideLifters(false)}
+                      style={{background:"rgba(224,82,82,0.1)",border:`1px solid ${P.danger}`,borderRadius:5,padding:"4px 12px",color:P.danger,fontSize:11,fontWeight:700,cursor:"pointer",letterSpacing:0.5}}>
+                      ✕ Disable All
+                    </button>
+                    <button onClick={()=>setSelectedPanels(new Set())}
+                      style={{marginLeft:"auto",background:"transparent",border:"none",color:P.muted,fontSize:11,cursor:"pointer",padding:"2px 6px"}}>
+                      Clear ✕
+                    </button>
+                  </>
+                ) : (
+                  <span style={{fontSize:11,color:P.muted}}>
+                    ☑ <b style={{color:P.text}}>Side Lifters</b> — select panels to bulk enable / disable.
+                  </span>
+                )}
+              </div>
+
+              {/* ── Top Lifters Facing bulk toolbar (only when any SL active) ── */}
+              {anyTopLifters && (
+                <div style={{
+                  display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",
+                  background:someTLSelected?P.card:P.surface,
+                  border:`1px solid ${someTLSelected?"#b07fea":P.border}`,
+                  borderRadius:8,padding:"10px 14px",marginBottom:12,
+                  transition:"all 0.2s",minHeight:46,
+                }}>
+                  {someTLSelected ? (
+                    <>
+                      <span style={{fontSize:11,color:P.muted,textTransform:"uppercase",letterSpacing:0.8}}>Top Lifters Facing</span>
+                      <div style={{width:1,height:20,background:P.border}}/>
+                      <span style={{fontSize:12,fontWeight:700,color:"#b07fea",fontFamily:"'IBM Plex Mono'"}}>
+                        {selectedTLPanels.size} panel{selectedTLPanels.size!==1?"s":""} selected
+                      </span>
+                      <div style={{width:1,height:20,background:P.border}}/>
+                      <button onClick={()=>applyBulkTopLifters("Front of Truck")}
+                        style={{background:"rgba(176,127,234,0.15)",border:"1px solid #b07fea",borderRadius:5,padding:"4px 12px",color:"#b07fea",fontSize:11,fontWeight:700,cursor:"pointer",letterSpacing:0.5}}>
+                        ← Front of Truck
+                      </button>
+                      <button onClick={()=>applyBulkTopLifters("Back of Truck")}
+                        style={{background:"rgba(176,127,234,0.15)",border:"1px solid #b07fea",borderRadius:5,padding:"4px 12px",color:"#b07fea",fontSize:11,fontWeight:700,cursor:"pointer",letterSpacing:0.5}}>
+                        Back of Truck →
+                      </button>
+                      <button onClick={()=>setSelectedTLPanels(new Set())}
+                        style={{marginLeft:"auto",background:"transparent",border:"none",color:P.muted,fontSize:11,cursor:"pointer",padding:"2px 6px"}}>
+                        Clear ✕
+                      </button>
+                    </>
+                  ) : (
+                    <span style={{fontSize:11,color:P.muted}}>
+                      ☑ <b style={{color:P.text}}>Top Lifters Facing</b> — select side-lifter panels to bulk set facing direction.
+                    </span>
+                  )}
+                </div>
+              )}
+
               <div style={{overflowX:"auto",marginBottom:20}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                   <thead>
                     <tr style={{background:P.surface,position:"sticky",top:0}}>
-                      {[..."Del. Seq,Panel ID,Level,Length (mm),Height (mm),Mass (T),Lane Dim Used,Side Lifters".split(","), ...(Object.values(sideLifters).some(Boolean)?["Top Lifters Facing?"]:[] )].map(h=>(
+                      {/* Side Lifters select-all */}
+                      <th style={{padding:"9px 10px",borderBottom:`2px solid ${P.border}`,textAlign:"center",width:36}}>
+                        <input type="checkbox"
+                          checked={allSelected}
+                          ref={el=>{ if(el) el.indeterminate = someSelected && !allSelected; }}
+                          onChange={toggleSelectAll}
+                          style={{width:14,height:14,accentColor:P.accent,cursor:"pointer"}}/>
+                      </th>
+                      {["Del. Seq","Panel ID","Level","Length (mm)","Height (mm)","Mass (T)","Lane Dim Used","Side Lifters"].map(h=>(
                         <th key={h} style={{padding:"9px 12px",borderBottom:`2px solid ${P.border}`,textAlign:"center",color:P.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,fontSize:10,whiteSpace:"nowrap"}}>{h}</th>
                       ))}
+                      {/* Top Lifters Facing column header with its own select-all */}
+                      {anyTopLifters && (
+                        <th style={{padding:"9px 10px",borderBottom:`2px solid ${P.border}`,textAlign:"center",whiteSpace:"nowrap"}}>
+                          <div style={{display:"inline-flex",alignItems:"center",gap:6}}>
+                            <input type="checkbox"
+                              checked={allTLSelected}
+                              ref={el=>{ if(el) el.indeterminate = someTLSelected && !allTLSelected; }}
+                              onChange={toggleSelectAllTL}
+                              style={{width:14,height:14,accentColor:"#b07fea",cursor:"pointer"}}/>
+                            <span style={{color:"#b07fea",fontWeight:600,textTransform:"uppercase",letterSpacing:0.8,fontSize:10}}>Top Lifters Facing?</span>
+                          </div>
+                        </th>
+                      )}
                     </tr>
                   </thead>
                   <tbody>
-                    {[...data.panels].sort((a,b)=>a.deliverySequence-b.deliverySequence).map((panel,i)=>{
-                      const hasSL = !!sideLifters[panel.productId];
-                      const dimUsed = hasSL ? panel.height : panel.length;
+                    {sortedPanels.map((panel,i)=>{
+                      const hasSL      = !!sideLifters[panel.productId];
+                      const dimUsed    = hasSL ? panel.height : panel.length;
+                      const isSelected   = selectedPanels.has(panel.productId);
+                      const isTLSelected = selectedTLPanels.has(panel.productId);
+                      // Row highlight: TL selection takes purple, SL takes amber, normal alternates
+                      const rowBg = isTLSelected ? "rgba(176,127,234,0.07)"
+                                  : isSelected   ? "rgba(232,160,32,0.07)"
+                                  : i%2===0      ? "transparent"
+                                  : "rgba(255,255,255,0.025)";
+                      const rowOutline = isTLSelected ? `1px solid #b07fea44`
+                                       : isSelected   ? `1px solid ${P.accent}44`
+                                       : "none";
                       return (
-                        <tr key={panel.productId} style={{background:i%2===0?"transparent":"rgba(255,255,255,0.025)",borderBottom:`1px solid ${P.border}22`}}>
+                        <tr key={panel.productId} style={{background:rowBg,borderBottom:`1px solid ${P.border}22`,outline:rowOutline,transition:"background 0.1s"}}>
+                          {/* Side Lifters row checkbox */}
+                          <td style={{padding:"7px 10px",textAlign:"center"}}>
+                            <input type="checkbox"
+                              checked={isSelected}
+                              onChange={()=>toggleSelect(panel.productId)}
+                              style={{width:14,height:14,accentColor:P.accent,cursor:"pointer"}}/>
+                          </td>
                           <td style={{padding:"7px 12px",textAlign:"center",color:P.muted,fontFamily:"'IBM Plex Mono'"}}>{panel.deliverySequence}</td>
                           <td style={{padding:"7px 12px",textAlign:"center",fontWeight:700,color:P.text,fontFamily:"'IBM Plex Mono'"}}>{panel.productId}</td>
                           <td style={{padding:"7px 12px",textAlign:"center",color:P.muted}}>{panel.level||"—"}</td>
-                          {/* Length cell — highlighted amber when no side lifters */}
+                          {/* Length cell */}
                           <td style={{padding:"7px 12px",textAlign:"center",fontFamily:"'IBM Plex Mono'",fontWeight:hasSL?400:700,
                             background:hasSL?"transparent":"rgba(232,160,32,0.15)",
                             color:hasSL?P.muted:P.accentLight,
                             borderLeft:hasSL?"none":`2px solid ${P.accent}66`}}>
                             {panel.length}
                           </td>
-                          {/* Height cell — highlighted blue when side lifters on */}
+                          {/* Height cell */}
                           <td style={{padding:"7px 12px",textAlign:"center",fontFamily:"'IBM Plex Mono'",fontWeight:hasSL?700:400,
                             background:hasSL?"rgba(91,141,217,0.15)":"transparent",
                             color:hasSL?"#5b8dd9":P.muted,
@@ -1029,17 +1199,23 @@ function App() {
                               <span style={{fontSize:11,color:hasSL?"#5b8dd9":P.muted}}>{hasSL?"On":"Off"}</span>
                             </label>
                           </td>
-                          {/* Top Lifters Facing — only shown when any side lifter active */}
-                          {Object.values(sideLifters).some(Boolean) && (
-                            <td style={{padding:"7px 12px",textAlign:"center"}}>
+                          {/* Top Lifters Facing — with its own row checkbox */}
+                          {anyTopLifters && (
+                            <td style={{padding:"7px 10px",textAlign:"center"}}>
                               {hasSL ? (
-                                <select
-                                  value={topLifters[panel.productId]||"Front of Truck"}
-                                  onChange={e=>setTopLifters(tl=>({...tl,[panel.productId]:e.target.value}))}
-                                  style={{background:P.surface,border:`1px solid ${P.border}`,borderRadius:4,padding:"3px 6px",color:P.text,fontSize:11,outline:"none",cursor:"pointer"}}>
-                                  <option>Front of Truck</option>
-                                  <option>Back of Truck</option>
-                                </select>
+                                <div style={{display:"inline-flex",alignItems:"center",gap:6}}>
+                                  <input type="checkbox"
+                                    checked={isTLSelected}
+                                    onChange={()=>toggleSelectTL(panel.productId)}
+                                    style={{width:14,height:14,accentColor:"#b07fea",cursor:"pointer"}}/>
+                                  <select
+                                    value={topLifters[panel.productId]||"Front of Truck"}
+                                    onChange={e=>setTopLifters(tl=>({...tl,[panel.productId]:e.target.value}))}
+                                    style={{background:P.surface,border:`1px solid ${isTLSelected?"#b07fea":P.border}`,borderRadius:4,padding:"3px 6px",color:isTLSelected?"#b07fea":P.text,fontSize:11,outline:"none",cursor:"pointer"}}>
+                                    <option>Front of Truck</option>
+                                    <option>Back of Truck</option>
+                                  </select>
+                                </div>
                               ) : (
                                 <span style={{fontSize:11,color:P.border}}>—</span>
                               )}
@@ -1071,7 +1247,8 @@ function App() {
                 <Btn label="GENERATE LOADS →" bg={P.accent} tc="#000" onClick={handleGenerate}/>
               </div>
             </div>
-          )}
+            );
+          })()}
 
           {/* ── CONFIG ── */}
           {step==="config"&&data&&(
@@ -1177,15 +1354,219 @@ function App() {
                 </div>
                 <div style={{marginLeft:"auto",display:"flex",gap:8}}>
                   <Btn label={busy==="dispatch"?"⏳ Generating…":"⬇ Dispatch Sheet PDF"} bg={P.highlight} border="#2a5f9e" tc={P.text} onClick={dlDispatch} disabled={!!busy}/>
+                  <Btn label="📋 Dispatch Preview" bg={showDispatchPreview?P.accent:"transparent"} border={showDispatchPreview?P.accent:P.border} tc={showDispatchPreview?"#000":P.accentLight} onClick={()=>setShowDispatchPreview(p=>!p)}/>
                   <Btn label={busy==="all"?"⏳ Generating…":"⬇ All Dockets PDF"}         bg={P.accent}                           tc="#000"   onClick={dlAll}      disabled={!!busy}/>
                   <Btn label="← Back to Review" bg="transparent" border={P.border} tc={P.muted} onClick={()=>setStep("review")}/>
                   <Btn label="💾 Save Session" bg="transparent" border={P.border} tc={P.accentLight} onClick={saveSession}/>
                   <Btn label="📂 Load Session" bg="transparent" border={P.border} tc={P.accentLight} onClick={()=>sessionRef.current.click()}/>
 
-                  <Btn label="New File" bg="transparent" border={P.border} tc={P.muted} onClick={()=>{setStep("upload");setData(null);setLoads([]);setSideLifters({});setTopLifters({});setLoadTrucks({});setLoadDates({});setLoadDelivDates({});setLoadCarriers({});setPanelNotes({});}}/>
+                  <Btn label="New File" bg="transparent" border={P.border} tc={P.muted} onClick={()=>{setStep("upload");setData(null);setLoads([]);setSideLifters({});setTopLifters({});setLoadTrucks({});setLoadDates({});setLoadDelivDates({});setLoadCarriers({});setPanelNotes({});setPanelTimeAtYard({});setPanelTimeOnSite({});setShowDispatchPreview(false);}}/>
                 </div>
               </div>
 
+              {/* ── DISPATCH SHEET PREVIEW (all loads) ── */}
+              {showDispatchPreview && (() => {
+                // Build all panels across all loads sorted by delivery sequence, mirroring the PDF
+                const allDispRows = loads.flatMap(l =>
+                  l.lanes.flatMap((lane, li) =>
+                    lane.map(p => ({
+                      ...p,
+                      loadNumber: l.number,
+                      lane: li===0?"A":li===1?"B":"C",
+                      laneIdx: li,
+                    }))
+                  )
+                ).sort((a,b) => a.deliverySequence - b.deliverySequence);
+
+                const cellSt = { padding:"0", textAlign:"center", verticalAlign:"middle" };
+                const inputSt = (accent) => ({
+                  width:"100%", boxSizing:"border-box", background:"transparent",
+                  border:"none", borderBottom:`1px solid ${accent}88`,
+                  outline:"none", color:accent, fontSize:11,
+                  fontFamily:"'IBM Plex Mono',monospace", padding:"5px 6px",
+                  textAlign:"center",
+                });
+
+                const COLS = [
+                  { label:"Product",       key:"product",    w:"9%"  },
+                  { label:"Length mm",     key:"length",     w:"7%"  },
+                  { label:"Height mm",     key:"height",     w:"7%"  },
+                  { label:"Mass T",        key:"mass",       w:"6%"  },
+                  { label:"Del. Seq",      key:"seq",        w:"5%"  },
+                  { label:"Load No.",      key:"load",       w:"5%"  },
+                  { label:"Lane",          key:"lane",       w:"4%"  },
+                  { label:"Time at Yard",  key:"yard",       w:"9%"  },
+                  { label:"Time on Site",  key:"site",       w:"9%"  },
+                  { label:"Delivery Date", key:"deliv",      w:"10%", editable:true, accent:P.accentLight },
+                  { label:"Trailer Type",  key:"trailer",    w:"12%", editable:true, accent:"#b07fea" },
+                  { label:"Comment",       key:"comment",    w:"17%"  },
+                ];
+
+                const totalW = loads.reduce((s,l)=>s+l.totalWeight,0);
+                let prevLoadNum = null;
+
+                return (
+                  <div style={{background:P.card,border:`1px solid ${P.border}`,borderRadius:10,padding:16}}>
+                    {/* Header */}
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                      <div>
+                        <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:22,fontWeight:700,color:P.accentLight}}>
+                          Dispatch Sheet Preview — {config.projectName}
+                        </div>
+                        <div style={{fontSize:12,color:P.muted,marginTop:2}}>
+                          All {loads.length} loads · {allDispRows.length} panels · sorted by delivery sequence
+                        </div>
+                      </div>
+                      <Btn label={busy==="dispatch"?"⏳ Generating…":"⬇ Export Dispatch PDF"} bg={P.highlight} border="#2a5f9e" tc={P.text} onClick={dlDispatch} disabled={!!busy}/>
+                    </div>
+
+                    {/* Editable column legend */}
+                    <div style={{display:"flex",gap:16,marginBottom:10,flexWrap:"wrap",padding:"8px 12px",background:P.surface,borderRadius:7,border:`1px solid ${P.border}`}}>
+                      <span style={{fontSize:10,color:P.muted,textTransform:"uppercase",letterSpacing:1,alignSelf:"center"}}>✎ Editable:</span>
+                      {[
+                        {label:"Delivery Date", accent:P.accentLight},
+                        {label:"Trailer Type",  accent:"#b07fea"},
+                      ].map(({label,accent})=>(
+                        <div key={label} style={{display:"flex",alignItems:"center",gap:5,fontSize:11}}>
+                          <div style={{width:3,height:14,background:accent,borderRadius:2}}/>
+                          <span style={{color:accent,fontWeight:600}}>{label}</span>
+                        </div>
+                      ))}
+                      <span style={{fontSize:10,color:P.muted,marginLeft:"auto",alignSelf:"center"}}>
+                        Delivery Date &amp; Trailer Type apply per load · Times apply per panel
+                      </span>
+                    </div>
+
+                    {/* Table */}
+                    <div style={{overflowX:"auto"}}>
+                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                        <thead>
+                          <tr style={{background:"#000"}}>
+                            {COLS.map(col=>(
+                              <th key={col.key} style={{
+                                padding:"8px 6px", width:col.w,
+                                textAlign:"center", fontWeight:700, textTransform:"uppercase",
+                                letterSpacing:0.7, fontSize:9, whiteSpace:"nowrap",
+                                color: col.editable ? col.accent : "#fff",
+                                borderBottom: col.editable ? `2px solid ${col.accent}` : "2px solid #333",
+                              }}>
+                                {col.editable && "✎ "}{col.label}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {allDispRows.map((p, i) => {
+                            const isNewLoad = p.loadNumber !== prevLoadNum;
+                            prevLoadNum = p.loadNumber;
+                            const lc = p.laneIdx===0?P.accent:p.laneIdx===1?P.laneB:P.laneC;
+                            const truckId  = loadTrucks[p.loadNumber] || config.truckTypeId;
+                            const truckObj = TRUCK_TYPES.find(t=>t.id===truckId) || truck;
+                            const overflowLoad = loads.find(l=>l.number===p.loadNumber);
+                            const isOverflow = overflowLoad && (
+                              overflowLoad.laneLength[0]>truckObj.maxLength ||
+                              overflowLoad.laneLength[1]>truckObj.maxLength ||
+                              overflowLoad.laneLength[2]>truckObj.maxLength
+                            );
+                            const commentParts = [];
+                            if (isNewLoad && isOverflow) commentParts.push("⚠ Review Truck Type!");
+                            if (sideLifters[p.productId]) commentParts.push("Top Lifters: "+(topLifters[p.productId]||"Front of Truck"));
+                            if (panelNotes[p.productId]) commentParts.push(panelNotes[p.productId]);
+                            const rowBg = i%2===0 ? "rgba(244,246,250,0.04)" : "transparent";
+
+                            return (
+                              <React.Fragment key={p.productId}>
+                                {/* Load group separator row */}
+                                {isNewLoad && i>0 && (
+                                  <tr><td colSpan={COLS.length} style={{padding:0,height:2,background:"#000"}}/></tr>
+                                )}
+                                <tr style={{background:isNewLoad?"rgba(30,73,118,0.18)":rowBg}}>
+                                  {/* Product */}
+                                  <td style={{...cellSt,padding:"5px 8px",fontFamily:"'IBM Plex Mono'",fontWeight:700,color:P.text}}>{p.productId}</td>
+                                  {/* Length */}
+                                  <td style={{...cellSt,padding:"5px 6px",color:P.muted,fontFamily:"'IBM Plex Mono'"}}>{p.length}</td>
+                                  {/* Height */}
+                                  <td style={{...cellSt,padding:"5px 6px",color:P.muted,fontFamily:"'IBM Plex Mono'"}}>{p.height}</td>
+                                  {/* Mass */}
+                                  <td style={{...cellSt,padding:"5px 6px",color:P.accentLight,fontFamily:"'IBM Plex Mono'",fontWeight:600}}>{p.mass.toFixed(1)}</td>
+                                  {/* Del Seq */}
+                                  <td style={{...cellSt,padding:"5px 6px",color:P.muted,fontFamily:"'IBM Plex Mono'"}}>{p.deliverySequence}</td>
+                                  {/* Load No — highlight on new load */}
+                                  <td style={{...cellSt,padding:"5px 6px",background:isNewLoad?"rgba(220,230,241,0.15)":"transparent"}}>
+                                    {isNewLoad && <span style={{fontFamily:"'IBM Plex Mono'",fontWeight:700,color:"#fff",fontSize:12}}>{p.loadNumber}</span>}
+                                  </td>
+                                  {/* Lane */}
+                                  <td style={{...cellSt,padding:"5px 6px"}}>
+                                    <span style={{color:lc,fontFamily:"'IBM Plex Mono'",fontWeight:700}}>{p.lane}</span>
+                                  </td>
+                                  {/* Time at Yard — read-only */}
+                                  <td style={{...cellSt,padding:"5px 8px",color:P.muted,fontFamily:"'IBM Plex Mono'",fontSize:11}}>
+                                    {panelTimeAtYard[p.productId]||<span style={{color:P.border}}>—</span>}
+                                  </td>
+                                  {/* Time on Site — read-only */}
+                                  <td style={{...cellSt,padding:"5px 8px",color:P.muted,fontFamily:"'IBM Plex Mono'",fontSize:11}}>
+                                    {panelTimeOnSite[p.productId]||<span style={{color:P.border}}>—</span>}
+                                  </td>
+                                  {/* Delivery Date — calendar picker per load */}
+                                  <td style={{...cellSt,borderLeft:`2px solid ${P.accent}22`,background:"rgba(232,160,32,0.03)"}}>
+                                    <div style={{position:"relative",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                                      <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,color:loadDelivDates[p.loadNumber]?P.accentLight:P.border,padding:"5px 24px 5px 6px",cursor:"pointer",whiteSpace:"nowrap"}}>
+                                        {loadDelivDates[p.loadNumber]||"DD/MM/YYYY"}
+                                      </span>
+                                      <span style={{position:"absolute",right:4,fontSize:13,color:P.accent,pointerEvents:"none",lineHeight:1}}>📅</span>
+                                      <input type="date"
+                                        onChange={e=>{
+                                          if(!e.target.value) return;
+                                          const [y,m,d]=e.target.value.split("-");
+                                          setLoadDelivDates(v=>({...v,[p.loadNumber]:`${d}/${m}/${y}`}));
+                                          e.target.value="";
+                                        }}
+                                        style={{position:"absolute",inset:0,width:"100%",height:"100%",opacity:0,cursor:"pointer",border:"none",padding:0,margin:0}}/>
+                                    </div>
+                                  </td>
+                                  {/* Trailer Type — editable per load */}
+                                  <td style={{...cellSt,borderLeft:`2px solid #b07fea22`,background:"rgba(176,127,234,0.03)"}}>
+                                    <select
+                                      value={loadTrucks[p.loadNumber]||config.truckTypeId}
+                                      onChange={e=>setLoadTrucks(lt=>({...lt,[p.loadNumber]:e.target.value}))}
+                                      style={{width:"100%",background:"transparent",border:"none",borderBottom:"1px solid #b07fea88",outline:"none",color:"#b07fea",fontSize:10,fontFamily:"'IBM Plex Mono',monospace",padding:"5px 4px",cursor:"pointer",textAlign:"center"}}>
+                                      {TRUCK_TYPES.map(tt=>(
+                                        <option key={tt.id} value={tt.id}>{tt.label}</option>
+                                      ))}
+                                    </select>
+                                  </td>
+                                  {/* Comment */}
+                                  <td style={{...cellSt,padding:"5px 8px",textAlign:"left",fontSize:10,
+                                    color:commentParts[0]&&commentParts[0].startsWith("⚠")?P.danger:P.muted}}>
+                                    {commentParts.join(" | ")||""}
+                                  </td>
+                                </tr>
+                              </React.Fragment>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Footer totals bar */}
+                    <div style={{display:"flex",gap:0,marginTop:14,background:"#000",borderRadius:7,overflow:"hidden"}}>
+                      {[
+                        {label:"Total Panels",  val:String(allDispRows.length)},
+                        {label:"Total Loads",   val:String(loads.length)},
+                        {label:"Total Weight",  val:totalW.toFixed(1)+" T"},
+                      ].map(({label,val},i)=>(
+                        <div key={label} style={{flex:1,padding:"10px 0",textAlign:"center",borderRight:i<2?"1px solid #333":"none"}}>
+                          <div style={{fontSize:9,color:"rgba(255,255,255,0.5)",textTransform:"uppercase",letterSpacing:1}}>{label}</div>
+                          <div style={{fontFamily:"'IBM Plex Mono'",fontSize:16,fontWeight:700,color:"#fff",marginTop:2}}>{val}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* ── LOAD LIST + DETAIL GRID (hidden when dispatch preview open) ── */}
+              {!showDispatchPreview && (
               <div style={{display:"grid",gridTemplateColumns:"240px 1fr",gap:16}}>
 
                 {/* Load list */}
@@ -1229,7 +1610,6 @@ function App() {
                             ))}
                           </select>
                         </div>
-
                       </div>
                     );
                   })}
@@ -1392,6 +1772,7 @@ function App() {
                   </div>
                 );})()}
               </div>
+              )}
             </div>
           )}
         </div>

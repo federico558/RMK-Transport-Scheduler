@@ -905,10 +905,14 @@ function App() {
     setShowEmailModal(true);
   };
 
+
+  const N8N_WEBHOOK_URL = "https://federicobrun.app.n8n.cloud/webhook/rmk-email";
+
   const handleEmailSend = async () => {
     setEmailBusy(true);
+    setEmailStep("sending");
     try {
-      // Generate dispatch PDF
+      // ── Generate dispatch PDF ──
       const truckLabels = {}, overflowMap = {};
       loads.forEach(l => {
         const tid = loadTrucks[l.number] || config.truckTypeId;
@@ -916,9 +920,14 @@ function App() {
         truckLabels[l.number] = lt.label;
         overflowMap[l.number] = l.laneLength[0]>lt.maxLength||l.laneLength[1]>lt.maxLength||l.laneLength[2]>lt.maxLength;
       });
-      const dispatchBytes = await generateDispatchPDF(loads, config.projectName, parseFloat(config.maxWeight)||22.5, (TRUCK_TYPES.find(t=>t.id===config.truckTypeId)||TRUCK_TYPES[2]).maxLength, truckLabels, overflowMap, topLifters, sideLifters, panelNotes, panelTimeAtYard, panelTimeOnSite, loadDelivDates, loadTrucks, config.truckTypeId);
+      const dispatchBytes = await generateDispatchPDF(
+        loads, config.projectName, parseFloat(config.maxWeight)||22.5,
+        (TRUCK_TYPES.find(t=>t.id===config.truckTypeId)||TRUCK_TYPES[2]).maxLength,
+        truckLabels, overflowMap, topLifters, sideLifters, panelNotes,
+        panelTimeAtYard, panelTimeOnSite, loadDelivDates, loadTrucks, config.truckTypeId
+      );
 
-      // Generate merged dockets PDF
+      // ── Generate merged dockets PDF ──
       const PDFLib = await getPdfLib();
       const { PDFDocument } = PDFLib;
       const merged = await PDFDocument.create();
@@ -931,23 +940,42 @@ function App() {
       }
       const docketsBytes = await merged.save();
 
-      // Download both files
-      downloadPDF(dispatchBytes, `${config.projectName}_Dispatch_Sheet.pdf`);
-      await new Promise(r => setTimeout(r, 600));
-      downloadPDF(docketsBytes, `${config.projectName}_All_Dockets.pdf`);
+      // ── Convert to base64 ──
+      const toBase64 = (bytes) => {
+        let binary = "";
+        const chunk = 8192;
+        for (let i = 0; i < bytes.length; i += chunk)
+          binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+        return btoa(binary);
+      };
 
-      setEmailStep("ready");
+      const recipients = emailAddresses.split(/[,;\n]+/).map(s=>s.trim()).filter(Boolean);
+      if (!recipients.length) throw new Error("No valid email addresses entered.");
+
+      // ── POST to n8n webhook ──
+      const res = await fetch(N8N_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to:            recipients.join(", "),
+          subject:       emailSubject,
+          message:       emailBody,
+          project:       config.projectName,
+          dispatch_name: `${config.projectName}_Dispatch_Sheet.pdf`,
+          dispatch_data: toBase64(dispatchBytes),
+          dockets_name:  `${config.projectName}_All_Dockets.pdf`,
+          dockets_data:  toBase64(docketsBytes),
+        }),
+      });
+
+      if (!res.ok) throw new Error(`n8n responded with status ${res.status}`);
+
+      setEmailStep("sent");
     } catch(e) {
-      setError("Email prep error: " + e.message);
+      setEmailStep("compose");
+      setError("Email error: " + (e?.message || String(e)));
     }
     setEmailBusy(false);
-  };
-
-  const fireMailto = () => {
-    const to = emailAddresses.split(/[,;\n]+/).map(s=>s.trim()).filter(Boolean).join(",");
-    const subject = encodeURIComponent(emailSubject);
-    const body    = encodeURIComponent(emailBody + "\n\n(Please attach the downloaded PDF files before sending.)");
-    window.location.href = `mailto:${to}?subject=${subject}&body=${body}`;
   };
 
   const truck = TRUCK_TYPES.find(t => t.id === config.truckTypeId) || TRUCK_TYPES[2];
@@ -999,7 +1027,7 @@ function App() {
         {/* ── Email Modal ── */}
         {showEmailModal && (
           <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}
-            onClick={()=>setShowEmailModal(false)}>
+            onClick={()=>{ if(emailStep!=="sending") setShowEmailModal(false); }}>
             <div style={{background:P.card,border:`1px solid ${P.border}`,borderRadius:14,padding:28,width:"100%",maxWidth:520,boxShadow:"0 12px 48px rgba(0,0,0,0.6)"}}
               onClick={e=>e.stopPropagation()}>
 
@@ -1007,15 +1035,16 @@ function App() {
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
                 <div>
                   <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:22,fontWeight:700,color:P.accentLight}}>✉ Email Documents</div>
-                  <div style={{fontSize:11,color:P.muted,marginTop:2}}>Dispatch Sheet + All Load Dockets</div>
+                  <div style={{fontSize:11,color:P.muted,marginTop:2}}>Dispatch Sheet + All Load Dockets · sent via EmailJS</div>
                 </div>
-                <button onClick={()=>setShowEmailModal(false)}
-                  style={{background:"transparent",border:`1px solid ${P.border}`,borderRadius:6,padding:"4px 10px",color:P.muted,fontSize:13,cursor:"pointer"}}>✕</button>
+                {emailStep !== "sending" && (
+                  <button onClick={()=>setShowEmailModal(false)}
+                    style={{background:"transparent",border:`1px solid ${P.border}`,borderRadius:6,padding:"4px 10px",color:P.muted,fontSize:13,cursor:"pointer"}}>✕</button>
+                )}
               </div>
 
-              {emailStep === "compose" ? (<>
-
-                {/* To */}
+              {/* ── COMPOSE ── */}
+              {emailStep === "compose" && (<>
                 <div style={{marginBottom:14}}>
                   <div style={{fontSize:10,color:P.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>To — Recipients</div>
                   <textarea
@@ -1027,7 +1056,6 @@ function App() {
                   <div style={{fontSize:10,color:P.muted,marginTop:3}}>Separate multiple addresses with commas or new lines.</div>
                 </div>
 
-                {/* Subject */}
                 <div style={{marginBottom:14}}>
                   <div style={{fontSize:10,color:P.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>Subject</div>
                   <input type="text"
@@ -1036,74 +1064,72 @@ function App() {
                     style={{width:"100%",boxSizing:"border-box",background:P.surface,border:`1px solid ${P.border}`,borderRadius:6,padding:"8px 10px",color:P.text,fontSize:12,outline:"none"}}/>
                 </div>
 
-                {/* Body */}
-                <div style={{marginBottom:20}}>
-                  <div style={{fontSize:10,color:P.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>Message Body</div>
+                <div style={{marginBottom:16}}>
+                  <div style={{fontSize:10,color:P.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>Message</div>
                   <textarea
                     value={emailBody}
                     onChange={e=>setEmailBody(e.target.value)}
-                    rows={6}
+                    rows={5}
                     style={{width:"100%",boxSizing:"border-box",background:P.surface,border:`1px solid ${P.border}`,borderRadius:6,padding:"8px 10px",color:P.text,fontSize:12,outline:"none",resize:"vertical",fontFamily:"'Barlow',sans-serif",lineHeight:1.5}}/>
                 </div>
 
-                {/* Attachments info */}
+                {/* Attachments */}
                 <div style={{background:P.surface,border:`1px solid ${P.border}`,borderRadius:8,padding:"10px 14px",marginBottom:20}}>
-                  <div style={{fontSize:10,color:P.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>📎 Attachments to be generated & downloaded</div>
-                  {[
-                    `${config.projectName}_Dispatch_Sheet.pdf`,
-                    `${config.projectName}_All_Dockets.pdf`,
-                  ].map(f=>(
-                    <div key={f} style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
-                      <span style={{fontSize:13,color:P.danger}}>📄</span>
+                  <div style={{fontSize:10,color:P.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>📎 Files — embedded as download buttons in email</div>
+                  {[`${config.projectName}_Dispatch_Sheet.pdf`, `${config.projectName}_All_Dockets.pdf`].map(f=>(
+                    <div key={f} style={{display:"flex",alignItems:"center",gap:7,marginBottom:3}}>
+                      <span style={{color:P.danger}}>📄</span>
                       <span style={{fontSize:11,color:P.text,fontFamily:"'IBM Plex Mono'"}}>{f}</span>
                     </div>
                   ))}
-                  <div style={{fontSize:10,color:P.muted,marginTop:6,lineHeight:1.5}}>
-                    Both PDFs will download automatically. Your email client will open pre-filled — attach the downloaded files before sending.
-                  </div>
                 </div>
 
                 <button
                   onClick={handleEmailSend}
-                  disabled={emailBusy || !emailAddresses.trim()}
-                  style={{width:"100%",padding:"11px",background:emailAddresses.trim()?P.accent:"#444",border:"none",borderRadius:7,color:emailAddresses.trim()?"#000":"#888",fontSize:13,fontWeight:700,cursor:emailAddresses.trim()?"pointer":"not-allowed",letterSpacing:0.5,transition:"all 0.2s"}}>
-                  {emailBusy ? "⏳ Generating PDFs…" : "⬇ Generate PDFs & Prepare Email"}
+                  disabled={!emailAddresses.trim()}
+                  style={{width:"100%",padding:"11px",background:emailAddresses.trim()?P.accent:"#444",border:"none",borderRadius:7,color:emailAddresses.trim()?"#000":"#888",fontSize:13,fontWeight:700,cursor:emailAddresses.trim()?"pointer":"not-allowed",letterSpacing:0.5}}>
+                  ✉ Send Email
                 </button>
+              </>)}
 
-              </>) : (<>
-
-                {/* Ready step */}
-                <div style={{textAlign:"center",padding:"10px 0 20px"}}>
-                  <div style={{fontSize:36,marginBottom:12}}>✅</div>
-                  <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:20,fontWeight:700,color:P.success,marginBottom:6}}>PDFs Downloaded!</div>
-                  <div style={{fontSize:12,color:P.muted,lineHeight:1.6,marginBottom:20}}>
-                    Both files have been saved to your downloads folder.<br/>
-                    Click below to open your email client — then attach the PDFs before sending.
+              {/* ── SENDING (spinner) ── */}
+              {emailStep === "sending" && (
+                <div style={{textAlign:"center",padding:"30px 0"}}>
+                  <div style={{fontSize:42,marginBottom:16}}>⏳</div>
+                  <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:20,fontWeight:700,color:P.accentLight,marginBottom:8}}>Sending…</div>
+                  <div style={{fontSize:12,color:P.muted,lineHeight:1.6}}>
+                    Generating PDFs and sending to<br/>
+                    <span style={{color:P.text,fontFamily:"'IBM Plex Mono'",fontSize:11}}>
+                      {emailAddresses.split(/[,;\n]+/).map(s=>s.trim()).filter(Boolean).join(", ")}
+                    </span>
                   </div>
-                  {/* File reminder */}
-                  <div style={{background:P.surface,border:`1px solid ${P.border}`,borderRadius:8,padding:"10px 14px",marginBottom:20,textAlign:"left"}}>
-                    <div style={{fontSize:10,color:P.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:1}}>📎 Attach these files:</div>
-                    {[
-                      `${config.projectName}_Dispatch_Sheet.pdf`,
-                      `${config.projectName}_All_Dockets.pdf`,
-                    ].map(f=>(
-                      <div key={f} style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
-                        <span style={{color:P.danger}}>📄</span>
-                        <span style={{fontSize:11,color:P.accentLight,fontFamily:"'IBM Plex Mono'"}}>{f}</span>
-                      </div>
+                </div>
+              )}
+
+              {/* ── SENT ── */}
+              {emailStep === "sent" && (
+                <div style={{textAlign:"center",padding:"20px 0"}}>
+                  <div style={{fontSize:48,marginBottom:14}}>✅</div>
+                  <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:22,fontWeight:700,color:P.success,marginBottom:8}}>Email Sent!</div>
+                  <div style={{fontSize:12,color:P.muted,lineHeight:1.7,marginBottom:20}}>
+                    Email sent with PDF download buttons to:<br/>
+                    {emailAddresses.split(/[,;\n]+/).map(s=>s.trim()).filter(Boolean).map(addr=>(
+                      <span key={addr} style={{display:"block",color:P.accentLight,fontFamily:"'IBM Plex Mono'",fontSize:11,marginTop:2}}>{addr}</span>
                     ))}
                   </div>
-                  <button onClick={fireMailto}
-                    style={{width:"100%",padding:"11px",background:P.accent,border:"none",borderRadius:7,color:"#000",fontSize:13,fontWeight:700,cursor:"pointer",letterSpacing:0.5,marginBottom:10}}>
-                    ✉ Open Email Client
-                  </button>
-                  <button onClick={()=>setEmailStep("compose")}
-                    style={{width:"100%",padding:"8px",background:"transparent",border:`1px solid ${P.border}`,borderRadius:7,color:P.muted,fontSize:11,cursor:"pointer"}}>
-                    ← Edit Message
-                  </button>
+                  <div style={{display:"flex",gap:10}}>
+                    <button onClick={()=>setEmailStep("compose")}
+                      style={{flex:1,padding:"9px",background:"transparent",border:`1px solid ${P.border}`,borderRadius:7,color:P.muted,fontSize:11,cursor:"pointer"}}>
+                      ← Send Again
+                    </button>
+                    <button onClick={()=>setShowEmailModal(false)}
+                      style={{flex:1,padding:"9px",background:P.accent,border:"none",borderRadius:7,color:"#000",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                      Done
+                    </button>
+                  </div>
                 </div>
+              )}
 
-              </>)}
             </div>
           </div>
         )}

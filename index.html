@@ -739,8 +739,19 @@ function App() {
     return () => document.removeEventListener("keydown", handleMgrPanelKey);
   });
 
-  // Move a panel between Lane A and Lane B within the same load
+  // Recompute laneLength / totalWeight / sorted panels list for a load
+  const recomputeLoad = (l, newLanes) => {
+    const laneLength = newLanes.map(lane =>
+      lane.reduce((s, p) => s + (sideLifters[p.productId] ? (p.height||0) : (p.length||0)), 0)
+    );
+    const totalWeight = newLanes.flat().reduce((s, p) => s + (p.mass || 0), 0);
+    const panels = [...newLanes[0], ...newLanes[1], ...newLanes[2]].sort((a,b) => a.deliverySequence - b.deliverySequence);
+    return { ...l, lanes: newLanes, laneLength, totalWeight, panels };
+  };
+
+  // Move a panel between lanes within the same load
   const movePanel = (loadNumber, panelId, fromLane, toLane) => {
+    if (fromLane === toLane) return;
     setLoads(prev => {
       const next = prev.map(l => {
         if (l.number !== loadNumber) return l;
@@ -749,17 +760,75 @@ function App() {
         if (!panel) return l;
         newLanes[fromLane] = newLanes[fromLane].filter(p => p.productId !== panelId);
         newLanes[toLane]   = [...newLanes[toLane], panel];
-        const laneLength = newLanes.map(lane =>
-          lane.reduce((s, p) => s + (sideLifters[p.productId] ? (p.height||0) : (p.length||0)), 0)
-        ); // 3 lanes
-        const panels = [...newLanes[0], ...newLanes[1], ...newLanes[2]].sort((a,b) => a.deliverySequence - b.deliverySequence);
-        return { ...l, lanes: newLanes, laneLength, panels };
+        return recomputeLoad(l, newLanes);
       });
-      // Keep activeLoad in sync
       const updated = next.find(l => l.number === loadNumber);
       if (updated) setActiveLoad(updated);
       return next;
     });
+  };
+
+  // Move a panel across loads (or across lanes within a load)
+  const movePanelBetweenLoads = (fromLoadNumber, panelId, fromLane, toLoadNumber, toLane) => {
+    if (fromLoadNumber === toLoadNumber && fromLane === toLane) return;
+    setLoads(prev => {
+      const fromLoad = prev.find(l => l.number === fromLoadNumber);
+      if (!fromLoad) return prev;
+      const panel = fromLoad.lanes[fromLane].find(p => p.productId === panelId);
+      if (!panel) return prev;
+      const next = prev.map(l => {
+        if (l.number === fromLoadNumber && l.number === toLoadNumber) {
+          const newLanes = l.lanes.map(lane => [...lane]);
+          newLanes[fromLane] = newLanes[fromLane].filter(p => p.productId !== panelId);
+          newLanes[toLane]   = [...newLanes[toLane], panel];
+          return recomputeLoad(l, newLanes);
+        }
+        if (l.number === fromLoadNumber) {
+          const newLanes = l.lanes.map((lane, i) => i === fromLane ? lane.filter(p => p.productId !== panelId) : [...lane]);
+          return recomputeLoad(l, newLanes);
+        }
+        if (l.number === toLoadNumber) {
+          const newLanes = l.lanes.map((lane, i) => i === toLane ? [...lane, panel] : [...lane]);
+          return recomputeLoad(l, newLanes);
+        }
+        return l;
+      });
+      if (activeLoad) {
+        const cur = next.find(l => l.number === activeLoad.number);
+        if (cur) setActiveLoad(cur);
+      }
+      return next;
+    });
+  };
+
+  // ── Drag & drop state and handlers ────────────────────────────────
+  const [dragInfo,    setDragInfo]    = useState(null); // { loadNumber, panelId, fromLane }
+  const [dragOverKey, setDragOverKey] = useState(null); // string id of current drop target
+
+  const onDragStartPanel = (loadNumber, panelId, fromLane) => (e) => {
+    setDragInfo({ loadNumber, panelId, fromLane });
+    try {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", `${loadNumber}:${fromLane}:${panelId}`);
+    } catch(_) {}
+  };
+  const onDragEndPanel = () => { setDragInfo(null); setDragOverKey(null); };
+
+  const onDragOverTarget = (key) => (e) => {
+    if (!dragInfo) return;
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = "move"; } catch(_) {}
+    if (dragOverKey !== key) setDragOverKey(key);
+  };
+  const onDragLeaveTarget = (key) => () => {
+    if (dragOverKey === key) setDragOverKey(null);
+  };
+  const onDropToLane = (toLoadNumber, toLane) => (e) => {
+    e.preventDefault();
+    if (!dragInfo) { setDragOverKey(null); return; }
+    movePanelBetweenLoads(dragInfo.loadNumber, dragInfo.panelId, dragInfo.fromLane, toLoadNumber, toLane);
+    setDragInfo(null);
+    setDragOverKey(null);
   };
 
   const handleDateInput = (setter, key) => (e) => {
@@ -1780,9 +1849,16 @@ function App() {
                     const l2Pct = Math.min(100,(load.laneLength[2]/loadTruckObj.maxLength)*100);
                     const laneOverflow = load.laneLength[0] > loadTruckObj.maxLength || load.laneLength[1] > loadTruckObj.maxLength || load.laneLength[2] > loadTruckObj.maxLength;
                     const active = activeLoad?.number===load.number;
+                    const loadDropKey = `load-${load.number}`;
+                    const isLoadOver = dragOverKey === loadDropKey;
+                    const isDifferentLoad = !!dragInfo && dragInfo.loadNumber !== load.number;
+                    const borderColor = isLoadOver ? P.accent : (laneOverflow ? P.danger : active ? P.accent : P.border);
                     return (
                       <div key={load.number}
-                        style={{background:active?P.highlight:P.card,border:`1px solid ${laneOverflow?P.danger:active?P.accent:P.border}`,borderRadius:8,padding:"10px 12px",transition:"all 0.15s"}}>
+                        onDragOver={isDifferentLoad ? onDragOverTarget(loadDropKey) : undefined}
+                        onDragLeave={isDifferentLoad ? onDragLeaveTarget(loadDropKey) : undefined}
+                        onDrop={isDifferentLoad ? onDropToLane(load.number, 0) : undefined}
+                        style={{background:isLoadOver?"rgba(232,160,32,0.18)":active?P.highlight:P.card,border:`${isLoadOver?2:1}px ${isLoadOver?"dashed":"solid"} ${borderColor}`,borderRadius:8,padding:"10px 12px",transition:"all 0.15s"}}>
                         <div onClick={()=>setActiveLoad(load)} style={{cursor:"pointer"}}>
                           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                             <span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:16,fontWeight:700,color:laneOverflow?P.danger:active?P.accentLight:P.text}}>Load {load.number}</span>
@@ -1891,26 +1967,41 @@ function App() {
 
                     {/* Truck visual */}
                     <div style={{marginBottom:14}}>
-                      <div style={{fontSize:11,color:P.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Truck Layout</div>
+                      <div style={{fontSize:11,color:P.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>
+                        Truck Layout
+                        <span style={{color:P.border,textTransform:"none",letterSpacing:0,marginLeft:8,fontSize:10}}>
+                          ✱ drag panels between lanes — or onto another load card on the left
+                        </span>
+                      </div>
                       <div style={{background:P.surface,borderRadius:8,padding:10,border:`1px solid ${P.border}`,display:"flex",flexDirection:"column",gap:6}}>
                         {[0,1,2].map(li=>{
                           const lc = li===0?P.accent:li===1?P.laneB:P.laneC;
                           const lp = activeLoad.lanes[li];
                           const lu = activeLoad.laneLength[li];
+                          const laneKey = `lane-${activeLoad.number}-${li}`;
+                          const isOver = dragOverKey === laneKey;
                           return (
                             <div key={li}>
                               <div style={{fontSize:10,color:lc,marginBottom:3,fontWeight:600}}>LANE {li===0?"A":li===1?"B":"C"} — {lu}mm / {truck.maxLength}mm</div>
-                              <div style={{display:"flex",gap:2,height:32,background:P.bg,borderRadius:4,padding:2,overflow:"hidden"}}>
+                              <div
+                                onDragOver={onDragOverTarget(laneKey)}
+                                onDragLeave={onDragLeaveTarget(laneKey)}
+                                onDrop={onDropToLane(activeLoad.number, li)}
+                                style={{display:"flex",gap:2,height:32,background:isOver?lc+"22":P.bg,borderRadius:4,padding:2,overflow:"hidden",outline:isOver?`2px dashed ${lc}`:"none",outlineOffset:-1,transition:"background 0.15s, outline 0.15s"}}>
                                 {lp.map(p=>{
                                   const pl=p.length;
+                                  const isDragging = dragInfo && dragInfo.panelId === p.productId && dragInfo.loadNumber === activeLoad.number;
                                   return (
-                                    <div key={p.productId} title={`${p.productId} | ${pl}mm | ${p.mass.toFixed(1)}T`}
-                                      style={{width:(pl/truck.maxLength*100)+"%",background:lc+"33",border:`1px solid ${lc}88`,borderRadius:2,display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,color:lc,fontFamily:"'IBM Plex Mono'",overflow:"hidden",whiteSpace:"nowrap",flexShrink:0,minWidth:18}}>
+                                    <div key={p.productId} title={`${p.productId} | ${pl}mm | ${p.mass.toFixed(1)}T — drag to move`}
+                                      draggable
+                                      onDragStart={onDragStartPanel(activeLoad.number, p.productId, li)}
+                                      onDragEnd={onDragEndPanel}
+                                      style={{width:(pl/truck.maxLength*100)+"%",background:lc+"33",border:`1px solid ${lc}88`,borderRadius:2,display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,color:lc,fontFamily:"'IBM Plex Mono'",overflow:"hidden",whiteSpace:"nowrap",flexShrink:0,minWidth:18,cursor:"grab",opacity:isDragging?0.35:1,transition:"opacity 0.15s"}}>
                                       {p.productId}
                                     </div>
                                   );
                                 })}
-                                {lu<truck.maxLength&&<div style={{flex:1,borderRadius:2,border:`1px dashed ${P.border}`}}/>}
+                                {lu<truck.maxLength&&<div style={{flex:1,borderRadius:2,border:`1px dashed ${P.border}`,pointerEvents:"none"}}/>}
                               </div>
                             </div>
                           );
@@ -1923,8 +2014,14 @@ function App() {
                       const lp=activeLoad.lanes[li];
                       if(!lp.length) return null;
                       const lc=li===0?P.accent:li===1?P.laneB:P.laneC;
+                      const tableKey  = `table-${activeLoad.number}-${li}`;
+                      const isTableOver = dragOverKey === tableKey;
                       return (
-                        <div key={li} style={{marginBottom:12}}>
+                        <div key={li}
+                          onDragOver={onDragOverTarget(tableKey)}
+                          onDragLeave={onDragLeaveTarget(tableKey)}
+                          onDrop={onDropToLane(activeLoad.number, li)}
+                          style={{marginBottom:12,borderRadius:6,padding:isTableOver?6:0,background:isTableOver?lc+"15":"transparent",outline:isTableOver?`2px dashed ${lc}`:"none",transition:"background 0.15s, outline 0.15s, padding 0.15s"}}>
                           <div style={{fontSize:11,color:lc,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>
                             Lane {li===0?"A":li===1?"B":"C"} — {lp.length} panel{lp.length>1?"s":""}
                           </div>
@@ -1937,8 +2034,14 @@ function App() {
                               </tr>
                             </thead>
                             <tbody>
-                              {lp.map((panel,i)=>(
-                                <tr key={panel.productId} style={{background:i%2===0?"transparent":"rgba(255,255,255,0.02)"}}>
+                              {lp.map((panel,i)=>{
+                                const isDragging = dragInfo && dragInfo.panelId === panel.productId && dragInfo.loadNumber === activeLoad.number;
+                                return (
+                                <tr key={panel.productId}
+                                  draggable
+                                  onDragStart={onDragStartPanel(activeLoad.number, panel.productId, li)}
+                                  onDragEnd={onDragEndPanel}
+                                  style={{background:i%2===0?"transparent":"rgba(255,255,255,0.02)",cursor:"grab",opacity:isDragging?0.4:1,transition:"opacity 0.15s"}}>
                                   <td style={{padding:"6px 10px",textAlign:"center",color:lc,fontFamily:"'IBM Plex Mono'",fontWeight:700}}>{i+1}</td>
                                   <td style={{padding:"6px 10px",textAlign:"center",fontWeight:600,color:P.text,fontFamily:"'IBM Plex Mono'"}}>{panel.productId}</td>
                                   <td style={{padding:"6px 10px",textAlign:"center",color:P.text,fontFamily:"'IBM Plex Mono'"}}>{panel.length}</td>
@@ -1963,7 +2066,8 @@ function App() {
                                     </select>
                                   </td>
                                 </tr>
-                              ))}
+                                );
+                              })}
                             </tbody>
                           </table>
                         </div>

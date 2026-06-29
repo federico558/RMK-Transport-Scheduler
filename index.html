@@ -632,6 +632,7 @@ function App() {
   const [panelTimeAtYard,  setPanelTimeAtYard]  = useState({});  // { productId: string }
   const [panelTimeOnSite,  setPanelTimeOnSite]  = useState({});  // { productId: string }
   const [showDispatchPreview, setShowDispatchPreview] = useState(false);
+  const [showAllLoadsView,    setShowAllLoadsView]    = useState(false);
   const [showEmailModal,      setShowEmailModal]      = useState(false);
   const [emailAddresses,      setEmailAddresses]      = useState("");
   const [emailSubject,        setEmailSubject]        = useState("");
@@ -829,6 +830,29 @@ function App() {
     movePanelBetweenLoads(dragInfo.loadNumber, dragInfo.panelId, dragInfo.fromLane, toLoadNumber, toLane);
     setDragInfo(null);
     setDragOverKey(null);
+  };
+
+  // Create an empty load at the end of the list
+  const addEmptyLoad = () => {
+    setLoads(prev => {
+      const nextNumber = prev.length > 0 ? Math.max(...prev.map(l => l.number)) + 1 : 1;
+      const newLoad = { number: nextNumber, lanes: [[],[],[]], laneLength: [0,0,0], totalWeight: 0, panels: [] };
+      setLoadTrucks(lt => ({ ...lt, [nextNumber]: config.truckTypeId }));
+      return [...prev, newLoad];
+    });
+  };
+
+  // Remove a load (intended for empty loads). Cleans up per-load metadata.
+  const removeLoad = (loadNumber) => {
+    setLoads(prev => {
+      const next = prev.filter(l => l.number !== loadNumber);
+      if (activeLoad?.number === loadNumber) setActiveLoad(next[0] || null);
+      return next;
+    });
+    setLoadTrucks(lt => { const n={...lt}; delete n[loadNumber]; return n; });
+    setLoadDates(d => { const n={...d}; delete n[loadNumber]; return n; });
+    setLoadDelivDates(d => { const n={...d}; delete n[loadNumber]; return n; });
+    setLoadCarriers(d => { const n={...d}; delete n[loadNumber]; return n; });
   };
 
   const handleDateInput = (setter, key) => (e) => {
@@ -1622,7 +1646,8 @@ function App() {
                 </div>
                 <div style={{marginLeft:"auto",display:"flex",gap:8}}>
                   <Btn label={busy==="dispatch"?"⏳ Generating…":"⬇ Dispatch Sheet PDF"} bg={P.highlight} border="#2a5f9e" tc={P.text} onClick={dlDispatch} disabled={!!busy}/>
-                  <Btn label="📋 Dispatch Preview" bg={showDispatchPreview?P.accent:"transparent"} border={showDispatchPreview?P.accent:P.border} tc={showDispatchPreview?"#000":P.accentLight} onClick={()=>setShowDispatchPreview(p=>!p)}/>
+                  <Btn label="📋 Dispatch Preview" bg={showDispatchPreview?P.accent:"transparent"} border={showDispatchPreview?P.accent:P.border} tc={showDispatchPreview?"#000":P.accentLight} onClick={()=>{setShowDispatchPreview(p=>!p); setShowAllLoadsView(false);}}/>
+                  <Btn label="🗂 All Loads View" bg={showAllLoadsView?P.accent:"transparent"} border={showAllLoadsView?P.accent:P.border} tc={showAllLoadsView?"#000":P.accentLight} onClick={()=>{setShowAllLoadsView(v=>!v); setShowDispatchPreview(false);}}/>
                   <Btn label={busy==="all"?"⏳ Generating…":"⬇ All Dockets PDF"}         bg={P.accent}                           tc="#000"   onClick={dlAll}      disabled={!!busy}/>
                   <Btn label="✉ Email Documents" bg="transparent" border="#4caf7d" tc="#4caf7d" onClick={openEmailModal} disabled={!!busy}/>
                   <Btn label="← Back to Review" bg="transparent" border={P.border} tc={P.muted} onClick={()=>setStep("review")}/>
@@ -1834,8 +1859,112 @@ function App() {
                 );
               })()}
 
-              {/* ── LOAD LIST + DETAIL GRID (hidden when dispatch preview open) ── */}
-              {!showDispatchPreview && (
+              {/* ── ALL LOADS VIEW (manual organization across loads) ── */}
+              {showAllLoadsView && (
+                <div style={{background:P.card,border:`1px solid ${P.border}`,borderRadius:10,padding:16}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14,gap:12,flexWrap:"wrap"}}>
+                    <div>
+                      <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:22,fontWeight:700,color:P.accentLight}}>
+                        All Loads — Manual Organization
+                      </div>
+                      <div style={{fontSize:12,color:P.muted,marginTop:2}}>
+                        Drag any panel between lanes or between loads. Use <b style={{color:P.text}}>+ Add Empty Load</b> to create a new load you can drop panels into.
+                      </div>
+                    </div>
+                    <button onClick={addEmptyLoad}
+                      style={{background:P.accent,border:"none",borderRadius:7,padding:"9px 16px",color:"#000",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                      + Add Empty Load
+                    </button>
+                  </div>
+
+                  <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                    {loads.map(load=>{
+                      const loadTruckId  = loadTrucks[load.number] || config.truckTypeId;
+                      const loadTruckObj = TRUCK_TYPES.find(t=>t.id===loadTruckId) || truck;
+                      const laneOverflow = load.laneLength.some(L => L > loadTruckObj.maxLength);
+                      const isEmpty      = load.panels.length === 0;
+                      return (
+                        <div key={load.number}
+                          style={{background:P.surface,border:`1px solid ${laneOverflow?P.danger:P.border}`,borderRadius:8,padding:12}}>
+                          {/* Load header */}
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,gap:8,flexWrap:"wrap"}}>
+                            <div style={{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap"}}>
+                              <span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:18,fontWeight:700,color:laneOverflow?P.danger:P.accentLight}}>
+                                Load {load.number}
+                              </span>
+                              <span style={{fontSize:11,color:P.muted,fontFamily:"'IBM Plex Mono'"}}>
+                                {load.totalWeight.toFixed(1)}T · {load.panels.length} panel{load.panels.length!==1?"s":""} · {loadTruckObj.label}
+                              </span>
+                              {laneOverflow && (
+                                <span style={{fontSize:10,fontWeight:700,color:P.danger,background:"rgba(224,82,82,0.15)",border:`1px solid ${P.danger}`,borderRadius:4,padding:"1px 7px",letterSpacing:0.3}}>
+                                  ⚠ Review Truck Type
+                                </span>
+                              )}
+                            </div>
+                            {isEmpty && (
+                              <button onClick={()=>removeLoad(load.number)}
+                                style={{background:"transparent",border:`1px solid ${P.danger}`,borderRadius:5,padding:"3px 10px",color:P.danger,fontSize:10,fontWeight:700,cursor:"pointer",letterSpacing:0.5}}>
+                                ✕ Remove Empty Load
+                              </button>
+                            )}
+                          </div>
+
+                          {/* 3 lanes side-by-side */}
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                            {[0,1,2].map(li=>{
+                              const lc = li===0?P.accent:li===1?P.laneB:P.laneC;
+                              const lp = load.lanes[li];
+                              const lu = load.laneLength[li];
+                              const isLaneOverflow = lu > loadTruckObj.maxLength;
+                              const laneKey = `all-${load.number}-${li}`;
+                              const isOver  = dragOverKey === laneKey;
+                              return (
+                                <div key={li}
+                                  onDragOver={onDragOverTarget(laneKey)}
+                                  onDragLeave={onDragLeaveTarget(laneKey)}
+                                  onDrop={onDropToLane(load.number, li)}
+                                  style={{background:isOver?lc+"22":P.bg,border:`1px ${isOver?"dashed":"solid"} ${isOver?lc:isLaneOverflow?P.danger:P.border}`,borderRadius:6,padding:7,minHeight:88,display:"flex",flexDirection:"column",transition:"background 0.15s, border 0.15s"}}>
+                                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                                    <span style={{fontSize:10,fontWeight:700,color:lc,letterSpacing:0.5}}>
+                                      LANE {li===0?"A":li===1?"B":"C"}
+                                    </span>
+                                    <span style={{fontSize:9,color:isLaneOverflow?P.danger:P.muted,fontFamily:"'IBM Plex Mono'"}}>
+                                      {lu}mm
+                                    </span>
+                                  </div>
+                                  <div style={{display:"flex",flexWrap:"wrap",gap:4,flex:1,alignContent:"flex-start"}}>
+                                    {lp.length === 0 ? (
+                                      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:P.border,fontSize:10,fontStyle:"italic",border:`1px dashed ${P.border}`,borderRadius:4,minHeight:50,padding:6}}>
+                                        Drop panels here
+                                      </div>
+                                    ) : lp.map(panel=>{
+                                      const isDragging = dragInfo && dragInfo.panelId === panel.productId && dragInfo.loadNumber === load.number;
+                                      return (
+                                        <div key={panel.productId}
+                                          draggable
+                                          onDragStart={onDragStartPanel(load.number, panel.productId, li)}
+                                          onDragEnd={onDragEndPanel}
+                                          title={`${panel.productId} | ${panel.length}mm × ${panel.height}mm | ${panel.mass.toFixed(1)}T — drag to move`}
+                                          style={{background:lc+"22",border:`1px solid ${lc}88`,borderRadius:4,padding:"4px 7px",cursor:"grab",minWidth:70,opacity:isDragging?0.35:1,transition:"opacity 0.15s"}}>
+                                          <div style={{fontSize:11,fontWeight:700,color:lc,fontFamily:"'IBM Plex Mono'",whiteSpace:"nowrap"}}>{panel.productId}</div>
+                                          <div style={{fontSize:9,color:P.muted,fontFamily:"'IBM Plex Mono'",marginTop:1}}>{panel.length}mm · {panel.mass.toFixed(1)}T</div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* ── LOAD LIST + DETAIL GRID (hidden when dispatch preview or all-loads view open) ── */}
+              {!showDispatchPreview && !showAllLoadsView && (
               <div style={{display:"grid",gridTemplateColumns:"240px 1fr",gap:16}}>
 
                 {/* Load list */}

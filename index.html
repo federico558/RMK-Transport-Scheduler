@@ -382,12 +382,14 @@ async function generateDispatchPDF(loads, projectName, maxWeight, maxLength, loa
   let { pg: page, y } = newPage();
   const BOTTOM_LIMIT = M + FOOTER_H + 4;
 
-  // ── All panels sorted by delivery sequence ──
-  const allPanels = loads
-    .flatMap(l => l.lanes.flatMap((lane, li) =>
+  // ── All panels grouped by load (preserving load order); sorted by delivery sequence within each load ──
+  const allPanels = loads.flatMap(l => {
+    const rows = l.lanes.flatMap((lane, li) =>
       lane.map(p => ({ ...p, loadNumber: l.number, lane: li===0?"A":li===1?"B":"C" }))
-    ))
-    .sort((a,b) => a.deliverySequence - b.deliverySequence);
+    );
+    rows.sort((a,b) => a.deliverySequence - b.deliverySequence);
+    return rows;
+  });
 
   const charPx = 7 * 0.58;
   const commentCol = TC[11];
@@ -1660,17 +1662,19 @@ function App() {
 
               {/* ── DISPATCH SHEET PREVIEW (all loads) ── */}
               {showDispatchPreview && (() => {
-                // Build all panels across all loads sorted by delivery sequence, mirroring the PDF
-                const allDispRows = loads.flatMap(l =>
-                  l.lanes.flatMap((lane, li) =>
+                // Build all panels grouped by load (preserving load order); within each load, sort by delivery sequence
+                const allDispRows = loads.flatMap(l => {
+                  const rows = l.lanes.flatMap((lane, li) =>
                     lane.map(p => ({
                       ...p,
                       loadNumber: l.number,
                       lane: li===0?"A":li===1?"B":"C",
                       laneIdx: li,
                     }))
-                  )
-                ).sort((a,b) => a.deliverySequence - b.deliverySequence);
+                  );
+                  rows.sort((a,b) => a.deliverySequence - b.deliverySequence);
+                  return rows;
+                });
 
                 const cellSt = { padding:"0", textAlign:"center", verticalAlign:"middle" };
                 const inputSt = (accent) => ({
